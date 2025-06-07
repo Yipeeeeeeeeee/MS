@@ -121,6 +121,9 @@ def run_background_task():
         traceback.print_exc()
 
 
-# ✅ Replit-compatible app start
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=81)
+    from os import environ
+    app.run(
+        host='0.0.0.0',          # VERY important for Railway
+        port=int(environ.get('PORT', 5000))  # Railway sets this PORT
+    )
