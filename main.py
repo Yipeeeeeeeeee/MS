@@ -64,13 +64,13 @@ def run_background_task():
                     'outtmpl': filepath,
                     'noplaylist': True,
                     'quiet': True,
-                    'ffmpeg_location': '/nix/store/3zc5jbvqzrn8zmva4fx5p0nh4yy03wk4-ffmpeg-6.1.1-bin/bin',
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
                         'preferredquality': '5'
-                    }]
+                    }],
                 }
+
 
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(f"ytsearch1:{query}", download=True)
@@ -127,3 +127,4 @@ if __name__ == '__main__':
         host='0.0.0.0',          # VERY important for Railway
         port=int(environ.get('PORT', 5000))  # Railway sets this PORT
     )
+
