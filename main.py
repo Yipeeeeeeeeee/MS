@@ -3,7 +3,6 @@ import os
 import json
 import traceback
 import gspread
-from threading import Thread
 from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -21,33 +20,32 @@ def get_credentials():
     creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
     return creds
 
-
-@app.route('/ping', methods=['GET'])
-def ping():
-    return "pong", 200
-
-
 @app.route('/', methods=['POST'])
-def trigger_script():
-    Thread(target=run_background_task).start()
-    return '🕒 Started background task', 200
-
-
-def run_background_task():
+def run_script():
     try:
         creds = get_credentials()
         gc = gspread.authorize(creds)
         sheet = gc.open("SS").sheet1
         drive_service = build('drive', 'v3', credentials=creds)
 
+        # Get trigger command from D1
+        command = sheet.acell("D1").value.strip().lower()
+
+        if command == "purge":
+            deleted = purge_all_audio_files(drive_service)
+            sheet.update_acell("D2", f"🧹 Purged {deleted} audio file(s)")
+            sheet.update_acell("D1", "Done")
+            return f"Purged {deleted} audio file(s)", 200
+
+        # Normal mode: download/upload
         rows = sheet.get_all_values()
 
-        for i, row in enumerate(rows[1:], start=2):  # Skip header
+        for i, row in enumerate(rows[1:], start=2):
             try:
                 artist, title, link = (row + ["", "", ""])[:3]
 
                 if link.strip():
-                    continue  # Skip if already has a link
+                    continue
 
                 if not artist or not title:
                     sheet.update_cell(i, 3, "⚠️ Missing artist/title")
@@ -55,7 +53,7 @@ def run_background_task():
 
                 query = f"{artist} - {title}"
                 filename_base = query.replace("/", "-").replace("\\", "-")
-                filepath = f"/tmp/{filename_base}.%(ext)s"
+                filepath = f'/tmp/{filename_base}.%(ext)s'
 
                 sheet.update_cell(i, 3, "🔄 Downloading...")
 
@@ -64,6 +62,7 @@ def run_background_task():
                     'outtmpl': filepath,
                     'noplaylist': True,
                     'quiet': True,
+                    'ffmpeg_location': '/usr/bin/ffmpeg',
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
@@ -71,13 +70,12 @@ def run_background_task():
                     }],
                 }
 
-
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(f"ytsearch1:{query}", download=True)
                     entry = info['entries'][0]
                     dl_filename = ydl.prepare_filename(entry)
 
-                # Find the file
+                # Look for downloaded audio file
                 filename = None
                 for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
                     test_file = os.path.splitext(dl_filename)[0] + ext
@@ -86,19 +84,15 @@ def run_background_task():
                         break
 
                 if not filename:
-                    sheet.update_cell(i, 3, "❌ File not found")
+                    sheet.update_cell(i, 3, "❌ File not found after download")
                     continue
 
-                sheet.update_cell(i, 3, "⬆️ Uploading...")
+                sheet.update_cell(i, 3, "⬆️ Uploading to Drive...")
 
-                file_metadata = {
-                    'name': os.path.basename(filename),
-                    'mimeType': 'audio/mpeg'
-                }
+                file_metadata = {'name': os.path.basename(filename), 'mimeType': 'audio/mpeg'}
                 media = MediaFileUpload(filename, mimetype='audio/mpeg')
                 file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-                # Make public
                 drive_service.permissions().create(
                     fileId=file['id'],
                     body={'role': 'reader', 'type': 'anyone'}
@@ -107,24 +101,33 @@ def run_background_task():
                 link = f"https://drive.google.com/file/d/{file['id']}/view"
                 sheet.update_cell(i, 3, link)
 
-                # Cleanup
-                drive_service.files().delete(fileId=file['id']).execute()
                 os.remove(filename)
 
             except Exception as e:
-                error = f"❌ Error: {str(e).splitlines()[0]}"
-                sheet.update_cell(i, 3, error)
+                sheet.update_cell(i, 3, f"❌ Error: {str(e).splitlines()[0]}")
                 traceback.print_exc()
+                continue
+
+        return '✅ Process completed', 200
 
     except Exception as e:
-        print("CRITICAL ERROR:", e)
+        print("Critical Error:", e)
         traceback.print_exc()
+        return f"❌ Critical Error: {e}", 500
 
+def purge_all_audio_files(drive_service):
+    deleted = 0
+    page_token = None
+    query = "mimeType contains 'audio/'"
+    while True:
+        response = drive_service.files().list(q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token).execute()
+        for file in response.get('files', []):
+            drive_service.files().delete(fileId=file['id']).execute()
+            deleted += 1
+        page_token = response.get('nextPageToken', None)
+        if not page_token:
+            break
+    return deleted
 
 if __name__ == '__main__':
-    from os import environ
-    app.run(
-        host='0.0.0.0',          # VERY important for Railway
-        port=int(environ.get('PORT', 5000))  # Railway sets this PORT
-    )
-
+    app.run(host='0.0.0.0', port=81)
