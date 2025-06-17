@@ -15,6 +15,8 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets'
 ]
 
+YOUTUBE_API_KEY = 'AIzaSyDXUuk00rScpwtX0BklWYHlbWEICxe0jLo'
+
 def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
     creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
@@ -27,8 +29,8 @@ def run_script():
         gc = gspread.authorize(creds)
         sheet = gc.open("SS").sheet1
         drive_service = build('drive', 'v3', credentials=creds)
+        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
-        # Get trigger command from D1
         command = sheet.acell("D1").value.strip().lower()
 
         if command == "purge":
@@ -37,7 +39,6 @@ def run_script():
             sheet.update_acell("D1", "Done")
             return f"Purged {deleted} audio file(s)", 200
 
-        # Normal mode: download/upload
         rows = sheet.get_all_values()
 
         for i, row in enumerate(rows[1:], start=2):
@@ -53,7 +54,20 @@ def run_script():
 
                 query = f"{artist} - {title}"
                 filename_base = query.replace("/", "-").replace("\\", "-")
-                filepath = f'/tmp/{filename_base}.%(ext)s'
+                filepath = f"/tmp/{filename_base}.%(ext)s"
+
+                # Search YouTube using API
+                search_response = youtube.search().list(
+                    q=query, part='id', maxResults=1, type='video'
+                ).execute()
+                items = search_response.get('items', [])
+
+                if not items:
+                    sheet.update_cell(i, 3, "❌ No results found")
+                    continue
+
+                video_id = items[0]['id']['videoId']
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
 
                 sheet.update_cell(i, 3, "🔄 Downloading...")
 
@@ -63,19 +77,27 @@ def run_script():
                     'noplaylist': True,
                     'quiet': True,
                     'ffmpeg_location': '/usr/bin/ffmpeg',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '5'
-                    }],
+                    'postprocessors': [
+                        {
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '5'
+                        },
+                        {
+                            'key': 'FFmpegMetadata',
+                            'add_metadata': True
+                        }
+                    ],
+                    'postprocessor_args': [
+                        '-metadata', f'title={title}',
+                        '-metadata', f'artist={artist}'
+                    ]
                 }
 
                 with YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(f"ytsearch1:{query}", download=True)
-                    entry = info['entries'][0]
-                    dl_filename = ydl.prepare_filename(entry)
+                    info = ydl.extract_info(video_url, download=True)
+                    dl_filename = ydl.prepare_filename(info)
 
-                # Look for downloaded audio file
                 filename = None
                 for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
                     test_file = os.path.splitext(dl_filename)[0] + ext
@@ -120,7 +142,9 @@ def purge_all_audio_files(drive_service):
     page_token = None
     query = "mimeType contains 'audio/'"
     while True:
-        response = drive_service.files().list(q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token).execute()
+        response = drive_service.files().list(
+            q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token
+        ).execute()
         for file in response.get('files', []):
             drive_service.files().delete(fileId=file['id']).execute()
             deleted += 1
@@ -132,6 +156,6 @@ def purge_all_audio_files(drive_service):
 if __name__ == '__main__':
     from os import environ
     app.run(
-        host='0.0.0.0',          # VERY important for Railway
-        port=int(environ.get('PORT', 5000))  # Railway sets this PORT
+        host='0.0.0.0',
+        port=int(environ.get('PORT', 5000))
     )
