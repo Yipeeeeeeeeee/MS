@@ -77,6 +77,7 @@ def run_script():
                     'noplaylist': True,
                     'quiet': True,
                     'ffmpeg_location': '/usr/bin/ffmpeg',
+                    'cookiefile': '/workspaces/MS/secrets/cookies.txt',  # ✅ Add this line
                     'postprocessors': [
                         {
                             'key': 'FFmpegExtractAudio',
@@ -93,6 +94,7 @@ def run_script():
                         '-metadata', f'artist={artist}'
                     ]
                 }
+
 
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(video_url, download=True)
