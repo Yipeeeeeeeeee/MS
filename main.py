@@ -7,6 +7,7 @@ from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
+from googleapiclient.errors import HttpError
 
 app = Flask(__name__)
 
@@ -15,7 +16,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets'
 ]
 
-YOUTUBE_API_KEY = 'AIzaSyDXUuk00rScpwtX0BklWYHlbWEICxe0jLo'
+YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']  # Set this in your env vars
 
 def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
@@ -32,7 +33,6 @@ def run_script():
         youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
         command = sheet.acell("D1").value.strip().lower()
-
         if command == "purge":
             deleted = purge_all_audio_files(drive_service)
             sheet.update_acell("D2", f"🧹 Purged {deleted} audio file(s)")
@@ -40,11 +40,9 @@ def run_script():
             return f"Purged {deleted} audio file(s)", 200
 
         rows = sheet.get_all_values()
-
         for i, row in enumerate(rows[1:], start=2):
             try:
                 artist, title, link = (row + ["", "", ""])[:3]
-
                 if link.strip():
                     continue
 
@@ -61,14 +59,29 @@ def run_script():
                     q=query, part='id', maxResults=1, type='video'
                 ).execute()
                 items = search_response.get('items', [])
-
                 if not items:
                     sheet.update_cell(i, 3, "❌ No results found")
                     continue
 
                 video_id = items[0]['id']['videoId']
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
 
+                # Get video details to check availability
+                video_details = youtube.videos().list(
+                    part='status,contentDetails',
+                    id=video_id
+                ).execute()
+                status = video_details['items'][0]['status']
+                restrictions = status.get('regionRestriction', {})
+
+                if status.get('uploadStatus') != 'processed' or status.get('privacyStatus') != 'public':
+                    sheet.update_cell(i, 3, "❌ Unavailable (private or not processed)")
+                    continue
+
+                if 'blocked' in restrictions or 'ageRestricted' in status.get('contentRating', {}):
+                    sheet.update_cell(i, 3, "❌ Blocked or age-restricted")
+                    continue
+
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
                 sheet.update_cell(i, 3, "🔄 Downloading...")
 
                 ydl_opts = {
@@ -77,7 +90,6 @@ def run_script():
                     'noplaylist': True,
                     'quiet': True,
                     'ffmpeg_location': '/usr/bin/ffmpeg',
-                    'cookiefile': '/workspaces/MS/secrets/cookies.txt',  # ✅ Add this line
                     'postprocessors': [
                         {
                             'key': 'FFmpegExtractAudio',
@@ -95,11 +107,11 @@ def run_script():
                     ]
                 }
 
-
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(video_url, download=True)
                     dl_filename = ydl.prepare_filename(info)
 
+                # Find actual downloaded file
                 filename = None
                 for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
                     test_file = os.path.splitext(dl_filename)[0] + ext
@@ -156,8 +168,7 @@ def purge_all_audio_files(drive_service):
     return deleted
 
 if __name__ == '__main__':
-    from os import environ
     app.run(
         host='0.0.0.0',
-        port=int(environ.get('PORT', 5000))
+        port=int(os.environ.get('PORT', 5000))
     )
