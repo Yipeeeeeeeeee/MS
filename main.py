@@ -2,12 +2,17 @@ from flask import Flask, request
 import os
 import json
 import traceback
+import time
+import random
 import gspread
 from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
-from googleapiclient.errors import HttpError
+from dotenv import load_dotenv
+
+# Load .env variables
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -16,7 +21,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets'
 ]
 
-YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']  # Set this in your env vars
+YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 
 def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
@@ -33,6 +38,7 @@ def run_script():
         youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
         command = sheet.acell("D1").value.strip().lower()
+
         if command == "purge":
             deleted = purge_all_audio_files(drive_service)
             sheet.update_acell("D2", f"🧹 Purged {deleted} audio file(s)")
@@ -40,9 +46,11 @@ def run_script():
             return f"Purged {deleted} audio file(s)", 200
 
         rows = sheet.get_all_values()
+
         for i, row in enumerate(rows[1:], start=2):
             try:
                 artist, title, link = (row + ["", "", ""])[:3]
+
                 if link.strip():
                     continue
 
@@ -59,30 +67,15 @@ def run_script():
                     q=query, part='id', maxResults=1, type='video'
                 ).execute()
                 items = search_response.get('items', [])
+
                 if not items:
                     sheet.update_cell(i, 3, "❌ No results found")
                     continue
 
                 video_id = items[0]['id']['videoId']
-
-                # Get video details to check availability
-                video_details = youtube.videos().list(
-                    part='status,contentDetails',
-                    id=video_id
-                ).execute()
-                status = video_details['items'][0]['status']
-                restrictions = status.get('regionRestriction', {})
-
-                if status.get('uploadStatus') != 'processed' or status.get('privacyStatus') != 'public':
-                    sheet.update_cell(i, 3, "❌ Unavailable (private or not processed)")
-                    continue
-
-                if 'blocked' in restrictions or 'ageRestricted' in status.get('contentRating', {}):
-                    sheet.update_cell(i, 3, "❌ Blocked or age-restricted")
-                    continue
-
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
-                sheet.update_cell(i, 3, "🔄 Downloading...")
+
+                sheet.update_cell(i, 3, "🔍 Checking video...")
 
                 ydl_opts = {
                     'format': 'bestaudio/best',
@@ -90,6 +83,12 @@ def run_script():
                     'noplaylist': True,
                     'quiet': True,
                     'ffmpeg_location': '/usr/bin/ffmpeg',
+                    'ratelimit': 512000,  # ~500 KB/s
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                    },
                     'postprocessors': [
                         {
                             'key': 'FFmpegExtractAudio',
@@ -107,11 +106,21 @@ def run_script():
                     ]
                 }
 
+                # Simulate first to catch restricted videos
+                try:
+                    with YoutubeDL({**ydl_opts, 'simulate': True}) as ydl:
+                        ydl.extract_info(video_url, download=False)
+                except Exception as e:
+                    sheet.update_cell(i, 3, f"❌ Skipped: {str(e).splitlines()[0]}")
+                    continue
+
+                sheet.update_cell(i, 3, "⬇️ Downloading...")
+
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(video_url, download=True)
                     dl_filename = ydl.prepare_filename(info)
 
-                # Find actual downloaded file
+                # Find actual output file
                 filename = None
                 for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
                     test_file = os.path.splitext(dl_filename)[0] + ext
@@ -138,6 +147,9 @@ def run_script():
                 sheet.update_cell(i, 3, link)
 
                 os.remove(filename)
+
+                # Random delay to avoid bot detection
+                time.sleep(random.uniform(3, 7))
 
             except Exception as e:
                 sheet.update_cell(i, 3, f"❌ Error: {str(e).splitlines()[0]}")
