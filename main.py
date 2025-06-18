@@ -9,10 +9,8 @@ from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
-from dotenv import load_dotenv
 
-# Load .env variables
-load_dotenv()
+
 
 app = Flask(__name__)
 
