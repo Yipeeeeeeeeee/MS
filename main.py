@@ -19,6 +19,12 @@ SCOPES = [
 
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+]
+
 def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
     return Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
@@ -59,15 +65,22 @@ def run_script():
                 search_response = youtube.search().list(
                     q=query, part='id', maxResults=1, type='video'
                 ).execute()
+
                 items = search_response.get('items', [])
                 if not items:
                     sheet.update_cell(i, 3, "❌ No results found")
                     continue
 
-                video_id = items[0]['id']['videoId']
+                video = items[0]
+                video_id = video.get('id', {}).get('videoId')
+                if not video_id:
+                    sheet.update_cell(i, 3, "❌ Invalid video result")
+                    continue
+
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
                 sheet.update_cell(i, 3, "🔄 Downloading...")
 
+                # Build download options
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'outtmpl': filepath,
@@ -90,11 +103,11 @@ def run_script():
                         '-metadata', f'artist={artist}'
                     ],
                     'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                        'User-Agent': random.choice(USER_AGENTS)
                     },
                 }
 
-                # Try downloading with retry
+                # Download with retry
                 success = False
                 for attempt in range(3):
                     try:
@@ -104,15 +117,15 @@ def run_script():
                         success = True
                         break
                     except Exception as e:
+                        print(f"Attempt {attempt + 1} failed: {e}")
                         if attempt == 2:
-                            raise e
-                        time.sleep(3)
+                            sheet.update_cell(i, 3, f"❌ Failed: {str(e).splitlines()[0]}")
+                        time.sleep(3 * (attempt + 1))  # exponential backoff
 
                 if not success:
-                    sheet.update_cell(i, 3, "❌ Failed after retries")
                     continue
 
-                # Look for the downloaded file
+                # Locate downloaded file
                 filename = None
                 for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
                     test_file = os.path.splitext(dl_filename)[0] + ext
@@ -139,7 +152,6 @@ def run_script():
                 sheet.update_cell(i, 3, link)
                 os.remove(filename)
 
-                # Add random delay between requests
                 time.sleep(random.uniform(2.5, 5))
 
             except Exception as e:
