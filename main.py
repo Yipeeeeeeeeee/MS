@@ -29,164 +29,6 @@ def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
     return Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
 
-@app.route('/', methods=['POST'])
-def run_script():
-    try:
-        creds = get_credentials()
-        gc = gspread.authorize(creds)
-        sheet = gc.open("SS").sheet1
-        drive_service = build('drive', 'v3', credentials=creds)
-        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-
-        command = sheet.acell("D1").value.strip().lower()
-        if command == "purge":
-            deleted = purge_all_audio_files(drive_service)
-            sheet.update_acell("D2", f"🧹 Purged {deleted} audio file(s)")
-            sheet.update_acell("D1", "Done")
-            return f"Purged {deleted} audio file(s)", 200
-
-        rows = sheet.get_all_values()
-        for i, row in enumerate(rows[1:], start=2):
-            try:
-                artist, title, link = (row + ["", "", ""])[:3]
-
-                if link.strip():
-                    continue
-
-                if not artist or not title:
-                    sheet.update_cell(i, 3, "⚠️ Missing artist/title")
-                    continue
-
-                query = f"{artist} - {title}"
-                filename_base = query.replace("/", "-").replace("\\", "-")
-                filepath = f"/tmp/{filename_base}.%(ext)s"
-
-                search_response = youtube.search().list(
-                    q=query, part='id', maxResults=1, type='video'
-                ).execute()
-
-                items = search_response.get('items', [])
-                if not items:
-                    sheet.update_cell(i, 3, "❌ No results found")
-                    continue
-
-                video = items[0]
-                video_id = video.get('id', {}).get('videoId')
-                if not video_id:
-                    sheet.update_cell(i, 3, "❌ Invalid video result")
-                    continue
-
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-                sheet.update_cell(i, 3, "🔄 Downloading...")
-
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': filepath,
-                    'noplaylist': True,
-                    'quiet': True,
-                    'ffmpeg_location': '/usr/bin/ffmpeg',
-                    'postprocessors': [
-                        {
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '5'
-                        },
-                        {
-                            'key': 'FFmpegMetadata',
-                            'add_metadata': True
-                        }
-                    ],
-                    'postprocessor_args': [
-                        '-metadata', f'title={title}',
-                        '-metadata', f'artist={artist}'
-                    ],
-                    'http_headers': {
-                        'User-Agent': random.choice(USER_AGENTS)
-                    },
-                }
-
-                success = False
-                for attempt in range(3):
-                    try:
-                        with YoutubeDL(ydl_opts) as ydl:
-                            info = ydl.extract_info(video_url, download=True)
-                            dl_filename = ydl.prepare_filename(info)
-                        success = True
-                        break
-                    except Exception as e:
-                        print(f"Attempt {attempt + 1} failed: {e}")
-                        if attempt == 2:
-                            sheet.update_cell(i, 3, f"❌ Failed: {str(e).splitlines()[0]}")
-                        time.sleep(3 * (attempt + 1))
-
-                if not success:
-                    continue
-
-                filename = None
-                for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
-                    test_file = os.path.splitext(dl_filename)[0] + ext
-                    if os.path.exists(test_file):
-                        filename = test_file
-                        break
-
-                if not filename:
-                    sheet.update_cell(i, 3, "❌ File not found after download")
-                    continue
-
-                sheet.update_cell(i, 3, "⬆️ Uploading to Drive...")
-
-                file_metadata = {'name': os.path.basename(filename), 'mimeType': 'audio/mpeg'}
-                media = MediaFileUpload(filename, mimetype='audio/mpeg')
-                file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-
-                drive_service.permissions().create(
-                    fileId=file['id'],
-                    body={'role': 'reader', 'type': 'anyone'}
-                ).execute()
-
-                link = f"https://drive.google.com/file/d/{file['id']}/view"
-                sheet.update_cell(i, 3, link)
-                os.remove(filename)
-
-                time.sleep(random.uniform(2.5, 5))
-
-            except Exception as e:
-                sheet.update_cell(i, 3, f"❌ Error: {str(e).splitlines()[0]}")
-                traceback.print_exc()
-                continue
-
-        return '✅ Process completed', 200
-
-    except Exception as e:
-        print("Critical Error:", e)
-        traceback.print_exc()
-        return f"❌ Critical Error: {e}", 500
-
-def purge_all_audio_files(drive_service):
-    deleted = 0
-    page_token = None
-    query = "mimeType contains 'audio/'"
-    while True:
-        response = drive_service.files().list(
-            q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token
-        ).execute()
-        for file in response.get('files', []):
-            drive_service.files().delete(fileId=file['id']).execute()
-            deleted += 1
-        page_token = response.get('nextPageToken', None)
-        if not page_token:
-            break
-    return deleted
-
-def get_video_title(video_id):
-    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-    response = youtube.videos().list(part='snippet', id=video_id).execute()
-    item = response['items'][0]['snippet']
-    return {
-        "title": item['title'],
-        "channel": item['channelTitle']
-    }
-
 @app.route('/download', methods=['POST'])
 def download_by_video_id():
     try:
@@ -204,26 +46,12 @@ def download_by_video_id():
         filepath = f"/tmp/{filename_base}.%(ext)s"
 
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
             'outtmpl': filepath,
             'noplaylist': True,
             'quiet': True,
+            'merge_output_format': 'mp4',
             'ffmpeg_location': '/usr/bin/ffmpeg',
-            'postprocessors': [
-                {
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '5'
-                },
-                {
-                    'key': 'FFmpegMetadata',
-                    'add_metadata': True
-                }
-            ],
-            'postprocessor_args': [
-                '-metadata', f'title={title_info["title"]}',
-                '-metadata', f'artist={title_info["channel"]}'
-            ],
             'http_headers': {
                 'User-Agent': random.choice(USER_AGENTS)
             },
@@ -234,7 +62,7 @@ def download_by_video_id():
             dl_filename = ydl.prepare_filename(info)
 
         filename = None
-        for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
+        for ext in [".mp4"]:
             test_file = os.path.splitext(dl_filename)[0] + ext
             if os.path.exists(test_file):
                 filename = test_file
@@ -243,8 +71,8 @@ def download_by_video_id():
         if not filename:
             return "❌ File not found", 500
 
-        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'audio/mpeg'}
-        media = MediaFileUpload(filename, mimetype='audio/mpeg')
+        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
+        media = MediaFileUpload(filename, mimetype='video/mp4')
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
         drive_service.permissions().create(
@@ -258,6 +86,15 @@ def download_by_video_id():
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
+
+def get_video_title(video_id):
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    response = youtube.videos().list(part='snippet', id=video_id).execute()
+    item = response['items'][0]['snippet']
+    return {
+        "title": item['title'],
+        "channel": item['channelTitle']
+    }
 
 if __name__ == '__main__':
     from os import environ
