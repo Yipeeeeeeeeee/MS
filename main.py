@@ -32,19 +32,22 @@ def get_credentials():
 @app.route('/download', methods=['POST'])
 def download_by_video_id():
     try:
+        # Get credentials and services
         creds = get_credentials()
         drive_service = build('drive', 'v3', credentials=creds)
         data = request.get_json()
         video_id = data.get('videoId')
+
         if not video_id:
             return "Missing videoId", 400
 
+        # Check video accessibility
+        video_info = get_video_title(video_id)
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        title_info = get_video_title(video_id)
-        query = f"{title_info['title']} - {title_info['channel']}"
-        safe_name = query.replace("/", "-").replace("\\", "-")
-        filepath_template = f"/tmp/{safe_name}.%(ext)s"
+        safe_title = f"{video_info['title']} - {video_info['channel']}".replace("/", "-").replace("\\", "-")
+        filepath_template = f"/tmp/{safe_title}.%(ext)s"
 
+        # yt-dlp options
         ydl_opts = {
             'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
             'outtmpl': filepath_template,
@@ -52,6 +55,10 @@ def download_by_video_id():
             'quiet': True,
             'merge_output_format': 'mp4',
             'ffmpeg_location': '/usr/bin/ffmpeg',
+            'ignoreerrors': True,
+            'nocheckcertificate': True,
+            'sleep_interval': 1,
+            'concurrent_fragment_downloads': 1,
             'http_headers': {
                 'User-Agent': random.choice(USER_AGENTS)
             },
@@ -66,40 +73,72 @@ def download_by_video_id():
             ]
         }
 
+        # Download video
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
             downloaded_path = ydl.prepare_filename(info)
 
-        # Detect actual saved filename with .mp4 extension
         filename = os.path.splitext(downloaded_path)[0] + ".mp4"
+
+        # Validate file
         if not os.path.exists(filename):
             return "❌ File not found", 500
 
-        # 🚨 Disk guard
+        if os.path.getsize(filename) < 1024:  # less than 1KB
+            os.remove(filename)
+            return "❌ File is empty", 500
+
         max_size_mb = 500
         if os.path.getsize(filename) > max_size_mb * 1024 * 1024:
             os.remove(filename)
             return f"❌ Video too large (>{max_size_mb}MB)", 400
 
-        # ✅ Upload to Drive
+        # Upload to Google Drive
         file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
         media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
-        uploaded = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
         # Make public
         drive_service.permissions().create(
-            fileId=uploaded['id'],
+            fileId=uploaded_file['id'],
             body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
-        # Cleanup
+        # Clean up
         os.remove(filename)
 
-        return f"https://drive.google.com/file/d/{uploaded['id']}/view", 200
+        return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
 
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
+
+def get_video_title(video_id):
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    response = youtube.videos().list(
+        part='snippet,status,contentDetails',
+        id=video_id
+    ).execute()
+
+    if not response['items']:
+        raise Exception("Video not found or private")
+
+    item = response['items'][0]
+    status = item['status']
+    details = item['contentDetails']
+
+    # Reject login-required, private, or blocked content
+    if status.get('privacyStatus') != 'public' or not status.get('embeddable', True):
+        raise Exception("Video is private or not embeddable")
+
+    if details.get('contentRating', {}).get('ytRating') == 'ytAgeRestricted':
+        raise Exception("Video is age-restricted")
+
+    return {
+        "title": item['snippet']['title'],
+        "channel": item['snippet']['channelTitle']
+    }
+
 
 
 def get_video_title(video_id):
