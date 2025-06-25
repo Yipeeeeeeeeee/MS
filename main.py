@@ -42,12 +42,12 @@ def download_by_video_id():
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         title_info = get_video_title(video_id)
         query = f"{title_info['title']} - {title_info['channel']}"
-        filename_base = query.replace("/", "-").replace("\\", "-")
-        filepath = f"/tmp/{filename_base}.%(ext)s"
+        safe_name = query.replace("/", "-").replace("\\", "-")
+        filepath_template = f"/tmp/{safe_name}.%(ext)s"
 
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
-            'outtmpl': filepath,
+            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'outtmpl': filepath_template,
             'noplaylist': True,
             'quiet': True,
             'merge_output_format': 'mp4',
@@ -55,37 +55,52 @@ def download_by_video_id():
             'http_headers': {
                 'User-Agent': random.choice(USER_AGENTS)
             },
+            'postprocessors': [
+                {
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4'
+                },
+                {
+                    'key': 'FFmpegMetadata'
+                }
+            ]
         }
 
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-            dl_filename = ydl.prepare_filename(info)
+            downloaded_path = ydl.prepare_filename(info)
 
-        filename = None
-        for ext in [".mp4"]:
-            test_file = os.path.splitext(dl_filename)[0] + ext
-            if os.path.exists(test_file):
-                filename = test_file
-                break
-
-        if not filename:
+        # Detect actual saved filename with .mp4 extension
+        filename = os.path.splitext(downloaded_path)[0] + ".mp4"
+        if not os.path.exists(filename):
             return "❌ File not found", 500
 
-        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
-        media = MediaFileUpload(filename, mimetype='video/mp4')
-        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        # 🚨 Disk guard
+        max_size_mb = 500
+        if os.path.getsize(filename) > max_size_mb * 1024 * 1024:
+            os.remove(filename)
+            return f"❌ Video too large (>{max_size_mb}MB)", 400
 
+        # ✅ Upload to Drive
+        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
+        media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
+        uploaded = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+        # Make public
         drive_service.permissions().create(
-            fileId=file['id'],
+            fileId=uploaded['id'],
             body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
+        # Cleanup
         os.remove(filename)
-        return f"https://drive.google.com/file/d/{file['id']}/view", 200
+
+        return f"https://drive.google.com/file/d/{uploaded['id']}/view", 200
 
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
+
 
 def get_video_title(video_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
