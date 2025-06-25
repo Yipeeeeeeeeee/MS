@@ -32,7 +32,7 @@ def get_credentials():
 @app.route('/download', methods=['POST'])
 def download_by_video_id():
     try:
-        # Get credentials and services
+        # Step 1: Prepare environment
         creds = get_credentials()
         drive_service = build('drive', 'v3', credentials=creds)
         data = request.get_json()
@@ -41,13 +41,13 @@ def download_by_video_id():
         if not video_id:
             return "Missing videoId", 400
 
-        # Check video accessibility
+        # Step 2: Check video info from YouTube API
         video_info = get_video_title(video_id)
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         safe_title = f"{video_info['title']} - {video_info['channel']}".replace("/", "-").replace("\\", "-")
         filepath_template = f"/tmp/{safe_title}.%(ext)s"
 
-        # yt-dlp options
+        # Step 3: yt-dlp options
         ydl_opts = {
             'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
             'outtmpl': filepath_template,
@@ -73,18 +73,23 @@ def download_by_video_id():
             ]
         }
 
-        # Download video
+        # Step 4: Download video using yt-dlp
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
+
+            # ✅ Safeguard against NoneType error
+            if not info:
+                return "❌ Video could not be downloaded (no info returned)", 500
+
             downloaded_path = ydl.prepare_filename(info)
 
+        # Step 5: Validate file
         filename = os.path.splitext(downloaded_path)[0] + ".mp4"
 
-        # Validate file
         if not os.path.exists(filename):
             return "❌ File not found", 500
 
-        if os.path.getsize(filename) < 1024:  # less than 1KB
+        if os.path.getsize(filename) < 1024:  # <1KB
             os.remove(filename)
             return "❌ File is empty", 500
 
@@ -93,18 +98,17 @@ def download_by_video_id():
             os.remove(filename)
             return f"❌ Video too large (>{max_size_mb}MB)", 400
 
-        # Upload to Google Drive
+        # Step 6: Upload to Google Drive
         file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
         media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
         uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-        # Make public
         drive_service.permissions().create(
             fileId=uploaded_file['id'],
             body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
-        # Clean up
+        # Step 7: Cleanup and return link
         os.remove(filename)
 
         return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
@@ -112,6 +116,11 @@ def download_by_video_id():
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
+
+
+
+
+
 
 def get_video_title(video_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
@@ -127,10 +136,11 @@ def get_video_title(video_id):
     status = item['status']
     details = item['contentDetails']
 
-    # Reject login-required, private, or blocked content
+    # 🚫 Skip private or login-required videos
     if status.get('privacyStatus') != 'public' or not status.get('embeddable', True):
         raise Exception("Video is private or not embeddable")
 
+    # 🚫 Skip age-restricted videos
     if details.get('contentRating', {}).get('ytRating') == 'ytAgeRestricted':
         raise Exception("Video is age-restricted")
 
@@ -139,16 +149,6 @@ def get_video_title(video_id):
         "channel": item['snippet']['channelTitle']
     }
 
-
-
-def get_video_title(video_id):
-    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-    response = youtube.videos().list(part='snippet', id=video_id).execute()
-    item = response['items'][0]['snippet']
-    return {
-        "title": item['title'],
-        "channel": item['channelTitle']
-    }
 
 if __name__ == '__main__':
     from os import environ
