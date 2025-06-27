@@ -25,6 +25,8 @@ USER_AGENTS = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
 ]
 
+SHARED_DRIVE_ID = '1L-HAhdWKIqn4bTteHZ0UwKtNF9QA9EaZ'  # Your Shared Drive ID here
+
 def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
     return Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
@@ -124,12 +126,23 @@ def process_audio_sheet():
 
                 sheet.update_cell(i, 3, "⬆️ Uploading to Drive...")
 
-                file_metadata = {'name': os.path.basename(filename), 'mimeType': 'audio/mpeg'}
+                file_metadata = {
+                    'name': os.path.basename(filename),
+                    'mimeType': 'audio/mpeg',
+                    'parents': [SHARED_DRIVE_ID]
+                }
                 media = MediaFileUpload(filename, mimetype='audio/mpeg')
-                file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                file = drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    supportsAllDrives=True,
+                    fields='id'
+                ).execute()
 
                 drive_service.permissions().create(
-                    fileId=file['id'], body={'role': 'reader', 'type': 'anyone'}
+                    fileId=file['id'],
+                    body={'role': 'reader', 'type': 'anyone'},
+                    supportsAllDrives=True
                 ).execute()
 
                 link = f"https://drive.google.com/file/d/{file['id']}/view"
@@ -148,6 +161,7 @@ def process_audio_sheet():
         print("Critical Error:", e)
         traceback.print_exc()
         return f"❌ Critical Error: {e}", 500
+
 
 @app.route('/download', methods=['POST'])
 def download_video():
@@ -183,48 +197,52 @@ def download_video():
             ]
         }
 
-        info = None
-        # Try download normally, fallback to generic extractor on failure
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
-        except Exception as e:
-            print("yt-dlp normal extractor failed, retrying with generic extractor:", e)
-            ydl_opts['force_generic_extractor'] = True
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            if not info:
+                return "❌ Video could not be downloaded (no info returned)", 500
+            downloaded_path = ydl.prepare_filename(info)
 
-        if not info:
-            return "❌ Video could not be downloaded (no info returned)", 500
+        filename = os.path.splitext(downloaded_path)[0] + ".mp4"
 
-        downloaded_path = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp4"
-
-        if not os.path.exists(downloaded_path):
+        if not os.path.exists(filename):
             return "❌ File not found", 500
 
-        if os.path.getsize(downloaded_path) < 1024:
-            os.remove(downloaded_path)
+        if os.path.getsize(filename) < 1024:
+            os.remove(filename)
             return "❌ File is empty", 500
 
-        if os.path.getsize(downloaded_path) > 500 * 1024 * 1024:
-            os.remove(downloaded_path)
+        if os.path.getsize(filename) > 500 * 1024 * 1024:
+            os.remove(filename)
             return "❌ Video too large (>500MB)", 400
 
-        file_metadata = {'name': os.path.basename(downloaded_path), 'mimeType': 'video/mp4'}
-        media = MediaFileUpload(downloaded_path, mimetype='video/mp4', resumable=True)
-        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-
-        drive_service.permissions().create(
-            fileId=uploaded_file['id'], body={'role': 'reader', 'type': 'anyone'}
+        file_metadata = {
+            'name': os.path.basename(filename),
+            'mimeType': 'video/mp4',
+            'parents': [SHARED_DRIVE_ID]
+        }
+        media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
+        uploaded_file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            supportsAllDrives=True,
+            fields='id'
         ).execute()
 
-        os.remove(downloaded_path)
+        drive_service.permissions().create(
+            fileId=uploaded_file['id'],
+            body={'role': 'reader', 'type': 'anyone'},
+            supportsAllDrives=True
+        ).execute()
+
+        os.remove(filename)
 
         return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
 
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
+
 
 def get_video_title(video_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
@@ -248,21 +266,28 @@ def get_video_title(video_id):
         "channel": item['snippet']['channelTitle']
     }
 
+
 def purge_all_media_files(drive_service):
     deleted = 0
     page_token = None
     query = "mimeType contains 'audio/' or mimeType contains 'video/'"
     while True:
         response = drive_service.files().list(
-            q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token
+            q=query,
+            spaces='drive',
+            fields='nextPageToken, files(id, name)',
+            pageToken=page_token,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
         for file in response.get('files', []):
-            drive_service.files().delete(fileId=file['id']).execute()
+            drive_service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
             deleted += 1
         page_token = response.get('nextPageToken', None)
         if not page_token:
             break
     return deleted
+
 
 if __name__ == '__main__':
     from os import environ
