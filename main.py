@@ -176,56 +176,60 @@ def download_video():
         if not video_id:
             return "Missing videoId", 400
 
-        info = get_video_title(video_id)
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        safe_title = f"{info['title']} - {info['channel']}".replace("/", "-").replace("\\", "-")
+        safe_title = video_id  # fallback to video_id as filename base
         filepath_template = f"/tmp/{safe_title}.%(ext)s"
 
+        user_agent = random.choice(USER_AGENTS)
+        print(f"Using User-Agent: {user_agent}")
+
         ydl_opts = {
-            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'format': 'bestaudio/best',
             'outtmpl': filepath_template,
             'noplaylist': True,
-            'merge_output_format': 'mp4',
-            'ffmpeg_location': '/usr/bin/ffmpeg',
-            'ignoreerrors': True,
-            'nocheckcertificate': True,
-            'sleep_interval': 1,
-            'concurrent_fragment_downloads': 1,
-            'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
-            'postprocessors': [
-                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
-                {'key': 'FFmpegMetadata'}
-            ],
+            'quiet': False,
             'logger': YDLLogger(),
-            'quiet': False
+            'http_headers': {'User-Agent': user_agent},
         }
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            if not info or not info.get("title"):
-                print("❌ yt-dlp returned empty info:", info)
-                return "❌ Video could not be downloaded (no info returned)", 500
-            downloaded_path = ydl.prepare_filename(info)
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                if not info:
+                    print(f"❌ yt-dlp returned no info for {video_url}")
+                    return "❌ Video could not be downloaded (no info returned)", 500
+                if not info.get("title"):
+                    print(f"❌ yt-dlp returned info but no title for {video_url}")
+                    return "❌ Video has no title info", 500
+                downloaded_path = ydl.prepare_filename(info)
+        except Exception as e:
+            print(f"❌ yt-dlp error for {video_url}: {e}")
+            return f"❌ yt-dlp error: {e}", 500
 
-        filename = os.path.splitext(downloaded_path)[0] + ".mp4"
+        # Find the actual downloaded audio file (usually mp3, m4a, webm, etc)
+        filename = None
+        for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
+            test_file = os.path.splitext(downloaded_path)[0] + ext
+            if os.path.exists(test_file):
+                filename = test_file
+                break
 
-        if not os.path.exists(filename):
-            return "❌ File not found", 500
+        if not filename:
+            print("❌ File not found after download")
+            return "❌ File not found after download", 500
 
         if os.path.getsize(filename) < 1024:
             os.remove(filename)
+            print("❌ File is empty")
             return "❌ File is empty", 500
 
-        if os.path.getsize(filename) > 500 * 1024 * 1024:
-            os.remove(filename)
-            return "❌ Video too large (>500MB)", 400
-
+        # Upload file to Shared Drive
         file_metadata = {
             'name': os.path.basename(filename),
-            'mimeType': 'video/mp4',
+            'mimeType': 'audio/mpeg',  # you can improve mime type detection if you want
             'parents': [SHARED_DRIVE_ID]
         }
-        media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
+        media = MediaFileUpload(filename, mimetype='audio/mpeg')
         uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
         drive_service.permissions().create(
@@ -239,6 +243,7 @@ def download_video():
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
+
 
 def get_video_title(video_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
