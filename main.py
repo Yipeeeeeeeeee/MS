@@ -46,7 +46,11 @@ def download_video():
         if not video_id:
             return "Missing videoId", 400
 
-        info = get_video_title(video_id)
+        try:
+            info = get_video_title(video_id)
+        except Exception as e:
+            return f"❌ Skipped: {e}", 400
+
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         safe_title = f"{info['title']} - {info['channel']}".replace("/", "-").replace("\\", "-")
         filepath_template = f"/tmp/{safe_title}.%(ext)s"
@@ -64,7 +68,13 @@ def download_video():
                     {'key': 'FFmpegMetadata'}
                 ],
                 'logger': YDLLogger(),
-                'quiet': False
+                'quiet': False,
+                'extractor_args': {
+                    'youtube': [
+                        'player_client=web',  # mimic standard web player to avoid bot check
+                        'check_formats=selected'
+                    ]
+                }
             }
             if force_generic:
                 opts['force_generic_extractor'] = True
