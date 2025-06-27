@@ -183,34 +183,42 @@ def download_video():
             ]
         }
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            if not info:
-                return "❌ Video could not be downloaded (no info returned)", 500
-            downloaded_path = ydl.prepare_filename(info)
+        info = None
+        # Try download normally, fallback to generic extractor on failure
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+        except Exception as e:
+            print("yt-dlp normal extractor failed, retrying with generic extractor:", e)
+            ydl_opts['force_generic_extractor'] = True
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
 
-        filename = os.path.splitext(downloaded_path)[0] + ".mp4"
+        if not info:
+            return "❌ Video could not be downloaded (no info returned)", 500
 
-        if not os.path.exists(filename):
+        downloaded_path = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp4"
+
+        if not os.path.exists(downloaded_path):
             return "❌ File not found", 500
 
-        if os.path.getsize(filename) < 1024:
-            os.remove(filename)
+        if os.path.getsize(downloaded_path) < 1024:
+            os.remove(downloaded_path)
             return "❌ File is empty", 500
 
-        if os.path.getsize(filename) > 500 * 1024 * 1024:
-            os.remove(filename)
+        if os.path.getsize(downloaded_path) > 500 * 1024 * 1024:
+            os.remove(downloaded_path)
             return "❌ Video too large (>500MB)", 400
 
-        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
-        media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
+        file_metadata = {'name': os.path.basename(downloaded_path), 'mimeType': 'video/mp4'}
+        media = MediaFileUpload(downloaded_path, mimetype='video/mp4', resumable=True)
         uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
         drive_service.permissions().create(
             fileId=uploaded_file['id'], body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
-        os.remove(filename)
+        os.remove(downloaded_path)
 
         return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
 
