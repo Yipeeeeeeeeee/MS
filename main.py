@@ -177,12 +177,14 @@ def download_video():
             return "Missing videoId", 400
 
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        safe_title = video_id  # fallback to video_id as filename base
+        safe_title = video_id  # fallback filename
         filepath_template = f"/tmp/{safe_title}.%(ext)s"
 
+        # Choose a user agent randomly and log it
         user_agent = random.choice(USER_AGENTS)
         print(f"Using User-Agent: {user_agent}")
 
+        # Minimal yt-dlp config for best audio
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': filepath_template,
@@ -192,21 +194,30 @@ def download_video():
             'http_headers': {'User-Agent': user_agent},
         }
 
+        # Try to download the video using yt-dlp
         try:
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
+
                 if not info:
                     print(f"❌ yt-dlp returned no info for {video_url}")
                     return "❌ Video could not be downloaded (no info returned)", 500
+
                 if not info.get("title"):
                     print(f"❌ yt-dlp returned info but no title for {video_url}")
                     return "❌ Video has no title info", 500
-                downloaded_path = ydl.prepare_filename(info)
-        except Exception as e:
-            print(f"❌ yt-dlp error for {video_url}: {e}")
-            return f"❌ yt-dlp error: {e}", 500
 
-        # Find the actual downloaded audio file (usually mp3, m4a, webm, etc)
+                downloaded_path = ydl.prepare_filename(info)
+
+        except Exception as e:
+            msg = str(e)
+            if "Sign in to confirm you're not a bot" in msg or "cookies" in msg:
+                print("❌ Skipping restricted video that requires login:", msg)
+                return "❌ Skipped: Video requires login or cookies", 400
+            print("❌ yt-dlp threw an unexpected error:", msg)
+            return f"❌ yt-dlp error: {msg}", 500
+
+        # Locate the downloaded file (could be mp3, m4a, etc.)
         filename = None
         for ext in [".mp3", ".m4a", ".webm", ".mp4"]:
             test_file = os.path.splitext(downloaded_path)[0] + ext
@@ -223,21 +234,27 @@ def download_video():
             print("❌ File is empty")
             return "❌ File is empty", 500
 
-        # Upload file to Shared Drive
+        # Upload the file to your shared Google Drive folder
         file_metadata = {
             'name': os.path.basename(filename),
-            'mimeType': 'audio/mpeg',  # you can improve mime type detection if you want
-            'parents': [SHARED_DRIVE_ID]
+            'mimeType': 'audio/mpeg',
+            'parents': [SHARED_DRIVE_ID]  # <-- make sure SHARED_DRIVE_ID is set
         }
-        media = MediaFileUpload(filename, mimetype='audio/mpeg')
-        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
+        media = MediaFileUpload(filename, mimetype='audio/mpeg')
+        uploaded_file = drive_service.files().create(
+            body=file_metadata, media_body=media, fields='id'
+        ).execute()
+
+        # Make the file public
         drive_service.permissions().create(
             fileId=uploaded_file['id'], body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
+        # Clean up temp file
         os.remove(filename)
 
+        # Return link to Google Sheets
         return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
 
     except Exception as e:
