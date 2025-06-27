@@ -19,6 +19,9 @@ SCOPES = [
 
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 
+# Use your shared drive ID here:
+SHARED_DRIVE_ID = '1L-HAhdWKIqn4bTteHZ0UwKtNF9QA9EaZ'
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15',
@@ -133,7 +136,11 @@ def process_audio_sheet():
 
                 sheet.update_cell(i, 3, "⬆️ Uploading to Drive...")
 
-                file_metadata = {'name': os.path.basename(filename), 'mimeType': 'audio/mpeg'}
+                file_metadata = {
+                    'name': os.path.basename(filename),
+                    'mimeType': 'audio/mpeg',
+                    'parents': [SHARED_DRIVE_ID]
+                }
                 media = MediaFileUpload(filename, mimetype='audio/mpeg')
                 file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
@@ -213,7 +220,11 @@ def download_video():
             os.remove(filename)
             return "❌ Video too large (>500MB)", 400
 
-        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
+        file_metadata = {
+            'name': os.path.basename(filename),
+            'mimeType': 'video/mp4',
+            'parents': [SHARED_DRIVE_ID]
+        }
         media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
         uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
@@ -254,13 +265,13 @@ def get_video_title(video_id):
 def purge_all_media_files(drive_service):
     deleted = 0
     page_token = None
-    query = "mimeType contains 'audio/' or mimeType contains 'video/'"
+    query = f"'{SHARED_DRIVE_ID}' in parents and (mimeType contains 'audio/' or mimeType contains 'video/')"
     while True:
         response = drive_service.files().list(
-            q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token
+            q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True
         ).execute()
         for file in response.get('files', []):
-            drive_service.files().delete(fileId=file['id']).execute()
+            drive_service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
             deleted += 1
         page_token = response.get('nextPageToken', None)
         if not page_token:
