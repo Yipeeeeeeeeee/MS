@@ -31,7 +31,7 @@ def process_audio_sheet():
 
         command = sheet.acell("D1").value.strip().lower()
         if command == "purge":
-            deleted = purge_all_audio_files(drive)
+            deleted = purge_all_media_files(drive_service)
             sheet.update_acell("D2", f"🧹 Purged {deleted} audio file(s)")
             return f"Purged {deleted} audio files", 200
 
@@ -168,19 +168,28 @@ def get_video_info(video_id):
         "channel": item['snippet']['channelTitle']
     }
 
-def purge_all_audio_files(drive):
+def purge_all_media_files(drive_service):
     deleted = 0
-    query = "mimeType contains 'audio/'"
     page_token = None
+    query = "mimeType contains 'audio/' or mimeType contains 'video/'"
     while True:
-        results = drive.files().list(q=query, fields='files(id)', pageToken=page_token).execute()
-        for f in results.get('files', []):
-            drive.files().delete(fileId=f['id']).execute()
+        response = drive_service.files().list(
+            q=query,
+            spaces='drive',
+            fields='nextPageToken, files(id, name)',
+            pageToken=page_token
+        ).execute()
+
+        for file in response.get('files', []):
+            drive_service.files().delete(fileId=file['id']).execute()
             deleted += 1
-        page_token = results.get('nextPageToken')
+
+        page_token = response.get('nextPageToken')
         if not page_token:
             break
+
     return deleted
+
 
 if __name__ == '__main__':
     from os import environ
