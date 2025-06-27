@@ -1,9 +1,5 @@
 from flask import Flask, request
-import os
-import json
-import traceback
-import time
-import random
+import os, json, traceback, time, random
 import gspread
 from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
@@ -12,13 +8,8 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-SCOPES = [
-    'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/spreadsheets'
-]
-
+SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
-
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15',
@@ -26,130 +17,172 @@ USER_AGENTS = [
 ]
 
 def get_credentials():
-    service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
-    return Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+    info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
+    return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-@app.route('/download', methods=['POST'])
-def download_by_video_id():
+@app.route('/', methods=['POST'])
+def process_audio_sheet():
     try:
-        # Step 1: Prepare environment
         creds = get_credentials()
-        drive_service = build('drive', 'v3', credentials=creds)
-        data = request.get_json()
-        video_id = data.get('videoId')
+        gc = gspread.authorize(creds)
+        sheet = gc.open("SS").worksheet("M")
+        drive = build('drive', 'v3', credentials=creds)
+        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
-        if not video_id:
-            return "Missing videoId", 400
+        command = sheet.acell("D1").value.strip().lower()
+        if command == "purge":
+            deleted = purge_all_audio_files(drive)
+            sheet.update_acell("D2", f"🧹 Purged {deleted} audio file(s)")
+            return f"Purged {deleted} audio files", 200
 
-        # Step 2: Check video info from YouTube API
-        video_info = get_video_title(video_id)
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        safe_title = f"{video_info['title']} - {video_info['channel']}".replace("/", "-").replace("\\", "-")
-        filepath_template = f"/tmp/{safe_title}.%(ext)s"
+        rows = sheet.get_all_values()
+        for i, row in enumerate(rows[1:], start=2):
+            artist, title, link = (row + ["", "", ""])[:3]
+            if link.strip():
+                continue
+            if not artist or not title:
+                sheet.update_cell(i, 3, "⚠️ Missing artist/title")
+                continue
 
-        # Step 3: yt-dlp options
-        ydl_opts = {
-            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-            'outtmpl': filepath_template,
-            'noplaylist': True,
-            'quiet': True,
-            'merge_output_format': 'mp4',
-            'ffmpeg_location': '/usr/bin/ffmpeg',
-            'ignoreerrors': True,
-            'nocheckcertificate': True,
-            'sleep_interval': 1,
-            'concurrent_fragment_downloads': 1,
-            'http_headers': {
-                'User-Agent': random.choice(USER_AGENTS)
-            },
-            'postprocessors': [
-                {
-                    'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mp4'
-                },
-                {
-                    'key': 'FFmpegMetadata'
-                }
-            ]
-        }
+            query = f"{artist} - {title}"
+            filename_base = query.replace("/", "-")
+            filepath = f"/tmp/{filename_base}.%(ext)s"
 
-        # Step 4: Download video using yt-dlp
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
+            search = youtube.search().list(q=query, part='id', maxResults=1, type='video').execute()
+            items = search.get('items', [])
+            if not items:
+                sheet.update_cell(i, 3, "❌ No results found")
+                continue
 
-            # ✅ Safeguard against NoneType error
-            if not info:
-                return "❌ Video could not be downloaded (no info returned)", 500
+            video_id = items[0]['id']['videoId']
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            sheet.update_cell(i, 3, "🔄 Downloading...")
 
-            downloaded_path = ydl.prepare_filename(info)
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': filepath,
+                'quiet': True,
+                'noplaylist': True,
+                'ffmpeg_location': '/usr/bin/ffmpeg',
+                'postprocessors': [
+                    {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '5'},
+                    {'key': 'FFmpegMetadata'}
+                ],
+                'postprocessor_args': ['-metadata', f'title={title}', '-metadata', f'artist={artist}'],
+                'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
+            }
 
-        # Step 5: Validate file
-        filename = os.path.splitext(downloaded_path)[0] + ".mp4"
+            success = False
+            for attempt in range(3):
+                try:
+                    with YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(video_url, download=True)
+                        filename = ydl.prepare_filename(info)
+                    success = True
+                    break
+                except Exception as e:
+                    print(f"Retry {attempt+1} failed:", e)
+                    time.sleep(3 * (attempt + 1))
 
-        if not os.path.exists(filename):
-            return "❌ File not found", 500
+            if not success or not os.path.exists(filename.replace(".webm", ".mp3")):
+                sheet.update_cell(i, 3, "❌ Download failed")
+                continue
 
-        if os.path.getsize(filename) < 1024:  # <1KB
-            os.remove(filename)
-            return "❌ File is empty", 500
+            file_path = filename.replace(".webm", ".mp3")
+            sheet.update_cell(i, 3, "⬆️ Uploading...")
 
-        max_size_mb = 500
-        if os.path.getsize(filename) > max_size_mb * 1024 * 1024:
-            os.remove(filename)
-            return f"❌ Video too large (>{max_size_mb}MB)", 400
+            metadata = {'name': os.path.basename(file_path), 'mimeType': 'audio/mpeg'}
+            media = MediaFileUpload(file_path, mimetype='audio/mpeg')
+            file = drive.files().create(body=metadata, media_body=media, fields='id').execute()
+            drive.permissions().create(fileId=file['id'], body={'role': 'reader', 'type': 'anyone'}).execute()
 
-        # Step 6: Upload to Google Drive
-        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
-        media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
-        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            link = f"https://drive.google.com/file/d/{file['id']}/view"
+            sheet.update_cell(i, 3, link)
+            os.remove(file_path)
+            time.sleep(random.uniform(2.5, 5))
 
-        drive_service.permissions().create(
-            fileId=uploaded_file['id'],
-            body={'role': 'reader', 'type': 'anyone'}
-        ).execute()
-
-        # Step 7: Cleanup and return link
-        os.remove(filename)
-
-        return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
-
+        return "✅ Audio Process Done", 200
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
 
+@app.route('/download', methods=['POST'])
+def download_video():
+    try:
+        creds = get_credentials()
+        drive = build('drive', 'v3', credentials=creds)
+        video_id = request.get_json().get('videoId')
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        info = get_video_info(video_id)
 
+        title_safe = f"{info['title']} - {info['channel']}".replace("/", "-")
+        outtmpl = f"/tmp/{title_safe}.%(ext)s"
 
+        ydl_opts = {
+            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'outtmpl': outtmpl,
+            'quiet': True,
+            'merge_output_format': 'mp4',
+            'ffmpeg_location': '/usr/bin/ffmpeg',
+            'postprocessors': [
+                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
+                {'key': 'FFmpegMetadata'}
+            ],
+            'http_headers': {'User-Agent': random.choice(USER_AGENTS)}
+        }
 
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            file_path = ydl.prepare_filename(info).replace(".webm", ".mp4")
 
+        if not os.path.exists(file_path):
+            return "❌ File not found", 500
 
-def get_video_title(video_id):
-    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-    response = youtube.videos().list(
-        part='snippet,status,contentDetails',
-        id=video_id
-    ).execute()
+        if os.path.getsize(file_path) > 500 * 1024 * 1024:
+            os.remove(file_path)
+            return "❌ File too large", 400
 
-    if not response['items']:
-        raise Exception("Video not found or private")
+        metadata = {'name': os.path.basename(file_path), 'mimeType': 'video/mp4'}
+        media = MediaFileUpload(file_path, mimetype='video/mp4')
+        uploaded = drive.files().create(body=metadata, media_body=media, fields='id').execute()
+        drive.permissions().create(fileId=uploaded['id'], body={'role': 'reader', 'type': 'anyone'}).execute()
+        os.remove(file_path)
 
+        return f"https://drive.google.com/file/d/{uploaded['id']}/view", 200
+    except Exception as e:
+        traceback.print_exc()
+        return f"❌ Error: {e}", 500
+
+def get_video_info(video_id):
+    yt = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    response = yt.videos().list(part='snippet,status,contentDetails', id=video_id).execute()
     item = response['items'][0]
-    status = item['status']
-    details = item['contentDetails']
 
-    # 🚫 Skip private or login-required videos
-    if status.get('privacyStatus') != 'public' or not status.get('embeddable', True):
+    if item['status']['privacyStatus'] != 'public' or not item['status'].get('embeddable', True):
         raise Exception("Video is private or not embeddable")
-
-    # 🚫 Skip age-restricted videos
-    if details.get('contentRating', {}).get('ytRating') == 'ytAgeRestricted':
-        raise Exception("Video is age-restricted")
+    if item['contentDetails'].get('contentRating', {}).get('ytRating') == 'ytAgeRestricted':
+        raise Exception("Age-restricted")
 
     return {
         "title": item['snippet']['title'],
         "channel": item['snippet']['channelTitle']
     }
 
+def purge_all_audio_files(drive):
+    deleted = 0
+    query = "mimeType contains 'audio/'"
+    page_token = None
+    while True:
+        results = drive.files().list(q=query, fields='files(id)', pageToken=page_token).execute()
+        for f in results.get('files', []):
+            drive.files().delete(fileId=f['id']).execute()
+            deleted += 1
+        page_token = results.get('nextPageToken')
+        if not page_token:
+            break
+    return deleted
 
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 5000)))
+    
