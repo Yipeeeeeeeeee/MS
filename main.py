@@ -149,6 +149,97 @@ def process_audio_sheet():
         traceback.print_exc()
         return f"❌ Critical Error: {e}", 500
 
+@app.route('/download', methods=['POST'])
+def download_video():
+    try:
+        creds = get_credentials()
+        drive_service = build('drive', 'v3', credentials=creds)
+        data = request.get_json()
+        video_id = data.get('videoId')
+
+        if not video_id:
+            return "Missing videoId", 400
+
+        info = get_video_title(video_id)
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        safe_title = f"{info['title']} - {info['channel']}".replace("/", "-").replace("\\", "-")
+        filepath_template = f"/tmp/{safe_title}.%(ext)s"
+
+        ydl_opts = {
+            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'outtmpl': filepath_template,
+            'noplaylist': True,
+            'quiet': True,
+            'merge_output_format': 'mp4',
+            'ffmpeg_location': '/usr/bin/ffmpeg',
+            'ignoreerrors': True,
+            'nocheckcertificate': True,
+            'sleep_interval': 1,
+            'concurrent_fragment_downloads': 1,
+            'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
+            'postprocessors': [
+                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
+                {'key': 'FFmpegMetadata'}
+            ]
+        }
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            if not info:
+                return "❌ Video could not be downloaded (no info returned)", 500
+            downloaded_path = ydl.prepare_filename(info)
+
+        filename = os.path.splitext(downloaded_path)[0] + ".mp4"
+
+        if not os.path.exists(filename):
+            return "❌ File not found", 500
+
+        if os.path.getsize(filename) < 1024:
+            os.remove(filename)
+            return "❌ File is empty", 500
+
+        if os.path.getsize(filename) > 500 * 1024 * 1024:
+            os.remove(filename)
+            return "❌ Video too large (>500MB)", 400
+
+        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
+        media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
+        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+        drive_service.permissions().create(
+            fileId=uploaded_file['id'], body={'role': 'reader', 'type': 'anyone'}
+        ).execute()
+
+        os.remove(filename)
+
+        return f"https://drive.google.com/file/d/{uploaded_file['id']}/view", 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return f"❌ Error: {e}", 500
+
+def get_video_title(video_id):
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    response = youtube.videos().list(part='snippet,status,contentDetails', id=video_id).execute()
+
+    if not response['items']:
+        raise Exception("Video not found or private")
+
+    item = response['items'][0]
+    status = item['status']
+    details = item['contentDetails']
+
+    if status.get('privacyStatus') != 'public' or not status.get('embeddable', True):
+        raise Exception("Video is private or not embeddable")
+
+    if details.get('contentRating', {}).get('ytRating') == 'ytAgeRestricted':
+        raise Exception("Video is age-restricted")
+
+    return {
+        "title": item['snippet']['title'],
+        "channel": item['snippet']['channelTitle']
+    }
+
 def purge_all_media_files(drive_service):
     deleted = 0
     page_token = None
