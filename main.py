@@ -9,6 +9,7 @@ from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
+from pprint import pprint
 
 app = Flask(__name__)
 
@@ -81,7 +82,8 @@ def download_video():
 
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
-                print("ℹ️ yt-dlp info dump:", json.dumps(info, indent=2) if info else "No info returned")
+                print("ℹ️ yt-dlp info dump:")
+                pprint(info)
                 return info, ydl.prepare_filename(info) if info else None
 
         info, downloaded_path = run_download()
