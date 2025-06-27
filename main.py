@@ -109,6 +109,21 @@ def download_video():
         traceback.print_exc()
         return f"❌ Error: {e}", 500
 
+@app.route('/test-access', methods=['GET'])
+def test_access():
+    try:
+        creds = get_credentials()
+        drive = build('drive', 'v3', credentials=creds)
+        results = drive.drives().list().execute()
+        drives = results.get('drives', [])
+        for d in drives:
+            print(f"Shared Drive: {d['name']} (ID: {d['id']})")
+        return json.dumps(drives), 200
+    except Exception as e:
+        return f"❌ Error: {e}", 500
+
+
+
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 5000)))
