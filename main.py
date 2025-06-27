@@ -234,22 +234,28 @@ def download_video():
             print("❌ File is empty")
             return "❌ File is empty", 500
 
-        # Upload the file to your shared Google Drive folder
         file_metadata = {
             'name': os.path.basename(filename),
             'mimeType': 'audio/mpeg',
-            'parents': [SHARED_DRIVE_ID]  # <-- make sure SHARED_DRIVE_ID is set
+            'parents': [SHARED_DRIVE_ID]
         }
 
         media = MediaFileUpload(filename, mimetype='audio/mpeg')
         uploaded_file = drive_service.files().create(
-            body=file_metadata, media_body=media, fields='id'
+            body=file_metadata,
+            media_body=media,
+            fields='id',
+            supportsAllDrives=True  # ✅ critical for Shared Drive uploads
         ).execute()
 
-        # Make the file public
+        # Make file public
         drive_service.permissions().create(
-            fileId=uploaded_file['id'], body={'role': 'reader', 'type': 'anyone'}
+            fileId=uploaded_file['id'],
+            body={'role': 'reader', 'type': 'anyone'},
+            supportsAllDrives=True  # ✅ also required here
         ).execute()
+
+
 
         # Clean up temp file
         os.remove(filename)
