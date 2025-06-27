@@ -25,7 +25,10 @@ USER_AGENTS = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
 ]
 
-SHARED_DRIVE_ID = '1L-HAhdWKIqn4bTteHZ0UwKtNF9QA9EaZ'  # Your Shared Drive ID here
+class YDLLogger:
+    def debug(self, msg): print(msg)
+    def warning(self, msg): print("⚠️", msg)
+    def error(self, msg): print("❌", msg)
 
 def get_credentials():
     service_account_info = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
@@ -83,7 +86,6 @@ def process_audio_sheet():
                     'format': 'bestaudio/best',
                     'outtmpl': filepath,
                     'noplaylist': True,
-                    'quiet': True,
                     'ffmpeg_location': '/usr/bin/ffmpeg',
                     'postprocessors': [
                         {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '5'},
@@ -93,7 +95,9 @@ def process_audio_sheet():
                         '-metadata', f'title={title}',
                         '-metadata', f'artist={artist}'
                     ],
-                    'http_headers': {'User-Agent': random.choice(USER_AGENTS)}
+                    'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
+                    'logger': YDLLogger(),
+                    'quiet': False
                 }
 
                 success = False
@@ -101,6 +105,9 @@ def process_audio_sheet():
                     try:
                         with YoutubeDL(ydl_opts) as ydl:
                             info = ydl.extract_info(video_url, download=True)
+                            if not info:
+                                print("❌ yt-dlp returned empty info:", info)
+                                continue
                             dl_filename = ydl.prepare_filename(info)
                         success = True
                         break
@@ -126,23 +133,12 @@ def process_audio_sheet():
 
                 sheet.update_cell(i, 3, "⬆️ Uploading to Drive...")
 
-                file_metadata = {
-                    'name': os.path.basename(filename),
-                    'mimeType': 'audio/mpeg',
-                    'parents': [SHARED_DRIVE_ID]
-                }
+                file_metadata = {'name': os.path.basename(filename), 'mimeType': 'audio/mpeg'}
                 media = MediaFileUpload(filename, mimetype='audio/mpeg')
-                file = drive_service.files().create(
-                    body=file_metadata,
-                    media_body=media,
-                    supportsAllDrives=True,
-                    fields='id'
-                ).execute()
+                file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
                 drive_service.permissions().create(
-                    fileId=file['id'],
-                    body={'role': 'reader', 'type': 'anyone'},
-                    supportsAllDrives=True
+                    fileId=file['id'], body={'role': 'reader', 'type': 'anyone'}
                 ).execute()
 
                 link = f"https://drive.google.com/file/d/{file['id']}/view"
@@ -161,7 +157,6 @@ def process_audio_sheet():
         print("Critical Error:", e)
         traceback.print_exc()
         return f"❌ Critical Error: {e}", 500
-
 
 @app.route('/download', methods=['POST'])
 def download_video():
@@ -183,7 +178,6 @@ def download_video():
             'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
             'outtmpl': filepath_template,
             'noplaylist': True,
-            'quiet': True,
             'merge_output_format': 'mp4',
             'ffmpeg_location': '/usr/bin/ffmpeg',
             'ignoreerrors': True,
@@ -194,12 +188,15 @@ def download_video():
             'postprocessors': [
                 {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
                 {'key': 'FFmpegMetadata'}
-            ]
+            ],
+            'logger': YDLLogger(),
+            'quiet': False
         }
 
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-            if not info:
+            if not info or not info.get("title"):
+                print("❌ yt-dlp returned empty info:", info)
                 return "❌ Video could not be downloaded (no info returned)", 500
             downloaded_path = ydl.prepare_filename(info)
 
@@ -216,23 +213,12 @@ def download_video():
             os.remove(filename)
             return "❌ Video too large (>500MB)", 400
 
-        file_metadata = {
-            'name': os.path.basename(filename),
-            'mimeType': 'video/mp4',
-            'parents': [SHARED_DRIVE_ID]
-        }
+        file_metadata = {'name': os.path.basename(filename), 'mimeType': 'video/mp4'}
         media = MediaFileUpload(filename, mimetype='video/mp4', resumable=True)
-        uploaded_file = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            supportsAllDrives=True,
-            fields='id'
-        ).execute()
+        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
         drive_service.permissions().create(
-            fileId=uploaded_file['id'],
-            body={'role': 'reader', 'type': 'anyone'},
-            supportsAllDrives=True
+            fileId=uploaded_file['id'], body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
         os.remove(filename)
@@ -242,7 +228,6 @@ def download_video():
     except Exception as e:
         traceback.print_exc()
         return f"❌ Error: {e}", 500
-
 
 def get_video_title(video_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
@@ -266,28 +251,21 @@ def get_video_title(video_id):
         "channel": item['snippet']['channelTitle']
     }
 
-
 def purge_all_media_files(drive_service):
     deleted = 0
     page_token = None
     query = "mimeType contains 'audio/' or mimeType contains 'video/'"
     while True:
         response = drive_service.files().list(
-            q=query,
-            spaces='drive',
-            fields='nextPageToken, files(id, name)',
-            pageToken=page_token,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
+            q=query, spaces='drive', fields='nextPageToken, files(id, name)', pageToken=page_token
         ).execute()
         for file in response.get('files', []):
-            drive_service.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
+            drive_service.files().delete(fileId=file['id']).execute()
             deleted += 1
         page_token = response.get('nextPageToken', None)
         if not page_token:
             break
     return deleted
-
 
 if __name__ == '__main__':
     from os import environ
