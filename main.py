@@ -20,14 +20,23 @@ def get_credentials():
 
 def get_video_title(video_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-    response = youtube.videos().list(part='snippet,status,contentDetails', id=video_id).execute()
+    response = youtube.videos().list(
+        part='snippet,status,contentDetails',
+        id=video_id
+    ).execute()
 
     if not response['items']:
         raise Exception("Video not found")
 
     item = response['items'][0]
-    if item['status']['privacyStatus'] != 'public' or not item['status'].get('embeddable', True):
-        raise Exception("Video is private or not embeddable")
+
+    # Ensure the video is public and embeddable
+    if item['status']['privacyStatus'] != 'public':
+        raise Exception("Video is not public")
+    if not item['status'].get('embeddable', True):
+        raise Exception("Video is not embeddable")
+
+    # Block age-restricted content
     if item['contentDetails'].get('contentRating', {}).get('ytRating') == 'ytAgeRestricted':
         raise Exception("Video is age-restricted")
 
@@ -47,6 +56,7 @@ def download_video():
         if not video_id:
             return "Missing videoId", 400
 
+        # Validate the video before downloading.
         info = get_video_title(video_id)
         title_safe = f"{info['title']} - {info['channel']}".replace("/", "-").replace("\\", "-")
         filepath = f"/tmp/{title_safe}.%(ext)s"
@@ -67,10 +77,11 @@ def download_video():
         }
 
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
-            if not info:
-                return "❌ Video could not be downloaded (no info returned)", 500
-            downloaded_path = ydl.prepare_filename(info)
+            try:
+                # Attempt to download the video.
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+            except Exception as ytdl_error:
+                return f"❌ Skipped: {ytdl_error}", 400
 
         if not os.path.exists(final_path):
             return "❌ File not found after yt-dlp", 500
@@ -92,6 +103,7 @@ def download_video():
             fields='id'
         ).execute()
 
+        # Set the file's permission to be readable by anyone.
         drive.permissions().create(
             fileId=uploaded_file['id'],
             body={'role': 'reader', 'type': 'anyone'}
