@@ -7,7 +7,6 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-SHARED_DRIVE_ID = "1L-HAhdWKIqn4bTteHZ0UwKtNF9QA9EaZ"
 SCOPES = ['https://www.googleapis.com/auth/drive']
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 USER_AGENTS = [
@@ -84,21 +83,18 @@ def download_video():
 
         file_metadata = {
             'name': os.path.basename(final_path),
-            'mimeType': 'video/mp4',
-            'parents': [SHARED_DRIVE_ID]
+            'mimeType': 'video/mp4'
         }
         media = MediaFileUpload(final_path, mimetype='video/mp4', resumable=True)
         uploaded_file = drive.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id',
-            supportsAllDrives=True
+            fields='id'
         ).execute()
 
         drive.permissions().create(
             fileId=uploaded_file['id'],
-            body={'role': 'reader', 'type': 'anyone'},
-            supportsAllDrives=True
+            body={'role': 'reader', 'type': 'anyone'}
         ).execute()
 
         os.remove(final_path)
@@ -114,15 +110,10 @@ def test_access():
     try:
         creds = get_credentials()
         drive = build('drive', 'v3', credentials=creds)
-        results = drive.drives().list().execute()
-        drives = results.get('drives', [])
-        for d in drives:
-            print(f"Shared Drive: {d['name']} (ID: {d['id']})")
-        return json.dumps(drives), 200
+        results = drive.files().list(pageSize=10, fields="files(id, name)").execute()
+        return json.dumps(results.get('files', [])), 200
     except Exception as e:
         return f"❌ Error: {e}", 500
-
-
 
 if __name__ == '__main__':
     from os import environ
